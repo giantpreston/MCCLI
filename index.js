@@ -3,21 +3,19 @@ const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
 const minecraftData = require('minecraft-data');
 const readline = require('readline');
 const chalk = require('chalk');
-const axios = require('axios');  // For fetching version from GitHub
+const axios = require('axios');
 
 let bot = null;
 let connected = false;
-let currentVersion = '1.0.0';  // Set your current MCCLI version here
-const versionURL = 'https://raw.githubusercontent.com/giantpreston/MCCLI/refs/heads/main/info/version.txt';  // GitHub raw file URL
+let currentVersion = '1.0.0';
+const versionURL = 'https://raw.githubusercontent.com/giantpreston/MCCLI/refs/heads/main/info/version.txt';
 
-// CLI setup
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout,
   prompt: '> ',
 });
 
-// Logger helper
 function log(level, msg) {
   const colors = {
     info: chalk.cyan,
@@ -31,13 +29,11 @@ function log(level, msg) {
   console.log(colors[level] ? colors[level](`[${tag}] ${msg}`) : `[LOG] ${msg}`);
 }
 
-// Function to check for updates
 async function checkForUpdate() {
   try {
     const response = await axios.get(versionURL);
-    const latestVersion = response.data.trim(); // Get the version from GitHub
+    const latestVersion = response.data.trim();
     
-    // Compare versions (you can use semantic versioning if needed)
     if (currentVersion.includes("pr")) {
       log('warn', `You are running a pre-release version of MCCLI, you may encounter bugs. Report them on the github.`);
     } else if (currentVersion !== latestVersion) {
@@ -53,7 +49,6 @@ async function checkForUpdate() {
   }
 }
 
-// Create bot
 function createBot(host, port = 25565, version) {
   return new Promise((resolve, reject) => {
     if (bot) return reject(log('warn', 'Bot already connected. Use "leave" first.'));
@@ -69,12 +64,10 @@ function createBot(host, port = 25565, version) {
       resolve(bot);
     });
 
-    // Log chat messages
     bot.on('chat', (username, message) => {
       if (username !== bot.username) log('chat', `${chalk.blue(username)}: ${message}`);
     });
 
-    // Log JSON/server messages
     bot.on('message', (msg) => {
       try {
         const text = typeof msg === 'string' ? msg : msg.toString();
@@ -84,7 +77,6 @@ function createBot(host, port = 25565, version) {
       }
     });
 
-    // Handle kicks gracefully
     bot.on('kicked', reason => log('error', `💀 Kicked: ${reason?.text || JSON.stringify(reason)}`));
     bot.on('end', () => {
       connected = false;
@@ -93,12 +85,11 @@ function createBot(host, port = 25565, version) {
     });
     bot.on('error', err => log('error', `🔥 ${err.message}`));
 
-    // Patch chat to prevent crashes on invalid packets
     const oldChat = bot.chat;
     bot.chat = (msg) => {
       if (!connected) return log('warn', 'Bot not connected.');
       try {
-        oldChat.call(bot, msg.slice(0, 256)); // prevent ERR_OUT_OF_RANGE
+        oldChat.call(bot, msg.slice(0, 256));
         log('info', `📢 You said: ${chalk.green(msg)}`);
       } catch (e) {
         log('warn', `Message not sent: ${e.message}`);
@@ -107,7 +98,6 @@ function createBot(host, port = 25565, version) {
   });
 }
 
-// Disconnect bot
 function leaveBot() {
   if (!bot) return log('warn', 'No bot connected.');
   bot.quit('User requested disconnect');
@@ -116,7 +106,6 @@ function leaveBot() {
   log('warn', '👋 Bot disconnected manually.');
 }
 
-// CLI command handler
 async function handleCommand(input) {
   const [cmd, ...args] = input.trim().split(' ');
   if (!cmd) return;
@@ -194,11 +183,9 @@ async function handleCommand(input) {
   }
 }
 
-// CLI loop
 async function init() {
   const latestVersion = await checkForUpdate();
 
-  // Print the welcome message
   log('success', `Welcome back to MCCLI, version v${currentVersion}`);
   log('success', 'This program allows you to play/join any server and do simple tasks such as chat, move, lookat, etc.');
   log('success', 'To learn more, simply write "help" in the console at any time.');
@@ -208,5 +195,4 @@ async function init() {
   rl.on('SIGINT', () => { leaveBot(); process.exit(0); });
 }
 
-// Initialize the bot and start CLI
 init();
