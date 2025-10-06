@@ -1,16 +1,20 @@
 /**
- * MCCLI v1.1.1_rc2 – Release Candidate 2
- * Improvements & Fixes:
- *  - Full global unhandled exception & unhandled promise rejection handling
- *    → Any error anywhere now triggers safe cleanup and optional auto-reconnect
- *  - Event listeners (chat, message, etc.) wrapped in try/catch
- *    → Prevents listeners from crashing the bot
- *  - Async operations wrapped in optional timeout wrappers
- *    → Hangs now fail safely after specified timeout
- *  - Auto-reconnect now triggered on both global and local errors
- *  - Prompt-safe logging improved for all errors and events
- *  - Minor CLI stability fixes
+ * MCCLI v1.1.1 – Stable Release
+ * 
+ * Changes since v1.0.0:
+ *  - Encapsulated bot in BotController class (no more global bot/connected)
+ *  - Full global error handling (unhandledRejection, uncaughtException, SIGINT/SIGTERM)
+ *  - Event listeners (chat, message, kicked, end) wrapped in try/catch to prevent crashes
+ *  - Async timeout wrapper for critical operations (connect, etc.)
+ *  - Auto-reconnect works after disconnects, crashes, or global errors; toggle via CLI
+ *  - Centralized prompt-safe logging with colors for all messages
+ *  - Commands refactored via registry: join, leave, say, query, lookat, goto, autoreconnect, help, exit, clear
+ *  - Bot actions improved: say handles signature errors, lookAt/goto validate coordinates, query shows position/players
+ *  - Version check enhanced: warns for outdated, RC, or pre-release builds
+ *  - Minor CLI and stability fixes
+ *  - Java Edition only (Mineflayer does not support Bedrock)
  */
+
 
 const mineflayer = require('mineflayer');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
@@ -19,7 +23,7 @@ const readline = require('readline');
 const chalk = require('chalk');
 const axios = require('axios');
 
-const currentVersion = '1.1.1_rc2';
+const currentVersion = '1.1.1';
 const versionURL = 'https://raw.githubusercontent.com/giantpreston/MCCLI/refs/heads/main/info/version.txt';
 
 const rl = readline.createInterface({
@@ -312,3 +316,4 @@ async function handleCommand(input) {
 
   rl.on('line', async (line) => { await handleCommand(line); rl.prompt(); });
 })();
+
