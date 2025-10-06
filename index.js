@@ -1,11 +1,15 @@
 /**
- * MCCLI v1.1.1_rc1 – Release Candidate Build
- * Improvements:
- *  - Suppress stack traces by default
- *  - Fixed chat/signature error handling (bot won't hang)
- *  - Robust connection error handling
- *  - Consistent padded log tags, prompt-safe output
- *  - RC/pre-release version check restored
+ * MCCLI v1.1.1_rc2 – Release Candidate 2
+ * Improvements & Fixes:
+ *  - Full global unhandled exception & unhandled promise rejection handling
+ *    → Any error anywhere now triggers safe cleanup and optional auto-reconnect
+ *  - Event listeners (chat, message, etc.) wrapped in try/catch
+ *    → Prevents listeners from crashing the bot
+ *  - Async operations wrapped in optional timeout wrappers
+ *    → Hangs now fail safely after specified timeout
+ *  - Auto-reconnect now triggered on both global and local errors
+ *  - Prompt-safe logging improved for all errors and events
+ *  - Minor CLI stability fixes
  */
 
 const mineflayer = require('mineflayer');
@@ -15,7 +19,7 @@ const readline = require('readline');
 const chalk = require('chalk');
 const axios = require('axios');
 
-const currentVersion = '1.1.1_rc1';
+const currentVersion = '1.1.1_rc2';
 const versionURL = 'https://raw.githubusercontent.com/giantpreston/MCCLI/refs/heads/main/info/version.txt';
 
 const rl = readline.createInterface({
@@ -43,7 +47,7 @@ function log(level, msg) {
   rl.prompt(true);
 }
 
-/** Check for version updates (includes RC & PR detection) */
+/** Check for version updates */
 async function checkForUpdate() {
   try {
     const res = await axios.get(versionURL);
@@ -63,6 +67,39 @@ async function checkForUpdate() {
   }
 }
 
+/** Timeout wrapper for async operations */
+async function withTimeout(promise, ms = 10000, description = 'operation') {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${description} timed out after ${ms}ms`)), ms)
+    ),
+  ]);
+}
+
+/** Global error handler */
+async function handleGlobalError(err, origin = 'unknown') {
+  log('error', `Global error (${origin}): ${err?.message || err}`);
+
+  if (controller && controller.connected) {
+    try {
+      log('warn', 'Attempting to safely recover the bot...');
+      controller.cleanup();
+      controller.tryReconnect();
+    } catch (cleanupErr) {
+      log('error', `Failed to recover bot: ${cleanupErr.message}`);
+    }
+  } else {
+    log('warn', 'No bot connected, nothing to recover.');
+  }
+}
+
+// Global handlers
+process.on('unhandledRejection', (reason, promise) => handleGlobalError(reason, 'unhandledRejection'));
+process.on('uncaughtException', (err) => handleGlobalError(err, 'uncaughtException'));
+process.on('SIGINT', () => { log('warn', 'SIGINT received, cleaning up...'); controller.disconnect(); process.exit(0); });
+process.on('SIGTERM', () => { log('warn', 'SIGTERM received, cleaning up...'); controller.disconnect(); process.exit(0); });
+
 /** BotController – handles bot state and actions */
 class BotController {
   constructor() {
@@ -74,7 +111,6 @@ class BotController {
     this.lastVersion = null;
   }
 
-  /** Create and connect bot */
   async connect(host, port = 25565, version) {
     if (this.connected) return log('error', 'Bot already connected.');
     if (!host) return log('warn', 'Usage: join <ip> [port|version] [version]');
@@ -85,48 +121,66 @@ class BotController {
 
     log('info', `🔌 Connecting to ${chalk.yellow(host)}:${chalk.yellow(port)} ${version ? `(v${version})` : ''}`);
 
-    return new Promise((resolve) => {
-      const bot = mineflayer.createBot({ host, port, version, auth: 'microsoft' });
-      this.bot = bot;
-      this.connected = false;
-      bot.loadPlugin(pathfinder);
+    return withTimeout(new Promise((resolve) => {
+      try {
+        const bot = mineflayer.createBot({ host, port, version, auth: 'microsoft' });
+        this.bot = bot;
+        this.connected = false;
+        bot.loadPlugin(pathfinder);
 
-      const handleError = (err) => {
-        if (!this.connected) log('error', `❌ ${err.message}`);
-        this.cleanup();
-        resolve(); // resolve to prevent hanging
-      };
+        const handleError = (err) => {
+          if (!this.connected) log('error', `❌ ${err.message}`);
+          this.cleanup();
+          resolve();
+        };
 
-      bot.once('spawn', () => {
-        this.connected = true;
-        const pos = bot.entity.position;
-        log('success', `🎮 Spawned at ${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)}`);
+        bot.once('spawn', () => {
+          this.connected = true;
+          const pos = bot.entity.position;
+          log('success', `🎮 Spawned at ${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)}`);
+          resolve();
+        });
+
+        bot.on('chat', (user, msg) => {
+          try {
+            if (user && user !== bot.username) log('chat', `${chalk.blue(user)}: ${msg}`);
+          } catch (err) {
+            log('error', `Chat listener error: ${err.message}`);
+          }
+        });
+
+        bot.on('message', (msg) => {
+          try {
+            const clean = msg.toString().trim().replace(/\s+/g, ' ');
+            log('event', `[srv msg] ${clean}`);
+          } catch (err) {
+            log('error', `Message listener error: ${err.message}`);
+          }
+        });
+
+        bot.on('kicked', (reason) => {
+          try {
+            log('error', `⬅️ Kicked: ${reason?.text || JSON.stringify(reason)}`);
+            this.cleanup();
+            this.tryReconnect();
+          } catch (err) { handleGlobalError(err, 'kicked'); }
+        });
+
+        bot.on('error', handleError);
+
+        bot.on('end', () => {
+          try {
+            if (this.connected) log('warn', '🔌 Disconnected.');
+            this.cleanup();
+            this.tryReconnect();
+          } catch (err) { handleGlobalError(err, 'end'); }
+        });
+
+      } catch (err) {
+        handleGlobalError(err, 'connect');
         resolve();
-      });
-
-      bot.on('chat', (user, msg) => {
-        if (user && user !== bot.username) log('chat', `${chalk.blue(user)}: ${msg}`);
-      });
-
-      bot.on('message', (msg) => {
-        const clean = msg.toString().trim().replace(/\s+/g, ' ');
-        log('event', `[srv msg] ${clean}`);
-      });
-
-      bot.on('kicked', (reason) => {
-        log('error', `⬅️ Kicked: ${reason?.text || JSON.stringify(reason)}`);
-        this.cleanup();
-        this.tryReconnect();
-      });
-
-      bot.on('error', handleError);
-
-      bot.on('end', () => {
-        if (this.connected) log('warn', '🔌 Disconnected.');
-        this.cleanup();
-        this.tryReconnect();
-      });
-    });
+      }
+    }), 15000, 'Bot connect');
   }
 
   cleanup() {
@@ -146,7 +200,7 @@ class BotController {
 
   disconnect() {
     if (!this.connected || !this.bot) return log('warn', 'No bot connected.');
-    this.bot.quit('User requested disconnect');
+    try { this.bot.quit('User requested disconnect'); } catch {}
     this.cleanup();
     log('warn', '👋 Bot disconnected manually.');
   }
@@ -160,14 +214,10 @@ class BotController {
     if (!this.connected || !this.bot) return log('warn', 'Bot not connected.');
     if (!message) return log('warn', 'Usage: say <message>');
 
-    try {
-      this.bot.chat(message.slice(0, 256), false);
-    } catch (err) {
-      if (err.message.includes('signature')) {
-        log('warn', '⚠️ Chat failed due to signature, ignored.');
-      } else {
-        log('error', `Chat failed: ${err.message}`);
-      }
+    try { this.bot.chat(message.slice(0, 256), false); }
+    catch (err) {
+      if (err.message.includes('signature')) log('warn', '⚠️ Chat failed due to signature, ignored.');
+      else log('error', `Chat failed: ${err.message}`);
     }
   }
 
@@ -250,12 +300,8 @@ async function handleCommand(input) {
   const fn = commands[cmd.toLowerCase()];
   if (!fn) return log('warn', `Unknown command: ${cmd}`);
   try { await fn(args); }
-  catch (e) { log('error', `Command failed: ${e.message}`); }
+  catch (e) { handleGlobalError(e, `command:${cmd}`); }
 }
-
-/** Global unhandled error catcher */
-process.on('unhandledRejection', (err) => { log('error', `Unhandled rejection: ${err.message}`); });
-process.on('uncaughtException', (err) => { log('error', `Uncaught exception: ${err.message}`); });
 
 /** Program entry point */
 (async function init() {
@@ -265,5 +311,4 @@ process.on('uncaughtException', (err) => { log('error', `Uncaught exception: ${e
   rl.prompt();
 
   rl.on('line', async (line) => { await handleCommand(line); rl.prompt(); });
-  rl.on('SIGINT', () => { controller.disconnect(); process.exit(0); });
 })();
