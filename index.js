@@ -1,3 +1,9 @@
+/**
+ * MCCLI v1.1.1pr
+ * Modular rewrite of v1.0.0 for maintainability, clarity, and scalability.
+ * Added "_rc" (release candidate) check in version handler.
+ */
+
 const mineflayer = require('mineflayer');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
 const minecraftData = require('minecraft-data');
@@ -5,9 +11,7 @@ const readline = require('readline');
 const chalk = require('chalk');
 const axios = require('axios');
 
-let bot = null;
-let connected = false;
-let currentVersion = '1.0.0';
+const currentVersion = '1.1.1_pr1';
 const versionURL = 'https://raw.githubusercontent.com/giantpreston/MCCLI/refs/heads/main/info/version.txt';
 
 const rl = readline.createInterface({
@@ -16,6 +20,7 @@ const rl = readline.createInterface({
   prompt: '> ',
 });
 
+/** Centralized colored logger */
 function log(level, msg) {
   const colors = {
     info: chalk.cyan,
@@ -29,170 +34,194 @@ function log(level, msg) {
   console.log(colors[level] ? colors[level](`[${tag}] ${msg}`) : `[LOG] ${msg}`);
 }
 
+/** Check version info (handles pre-release and RC builds) */
 async function checkForUpdate() {
   try {
-    const response = await axios.get(versionURL);
-    const latestVersion = response.data.trim();
-    
-    if (currentVersion.includes("pr")) {
-      log('warn', `You are running a pre-release version of MCCLI, you may encounter bugs. Report them on the github.`);
-    } else if (currentVersion !== latestVersion) {
-      log('error', `Outdated MCCLI version! The latest version is v${latestVersion}. Update by getting that version at github.com/giantpreston/MCCLI`);
-    } else {
-      log('success', `You are running the latest version of MCCLI!`);
-    }
+    const res = await axios.get(versionURL);
+    const latest = res.data.trim();
 
-    return latestVersion;
-  } catch (error) {
-    log('warn', `Failed to check for updates: ${error.message}`);
-    return null;
+    if (currentVersion.includes('pr')) {
+      log('warn', '⚠️ You are running a pre-release version of MCCLI; bugs may occur.');
+    } else if (currentVersion.includes('_rc')) {
+      log('info', 'ℹ️ This is a release-candidate build (_rc). Some minor issues may exist.');
+    } else if (latest !== currentVersion) {
+      log('error', `Outdated MCCLI! Latest is v${latest}. Get it from github.com/giantpreston/MCCLI`);
+    } else {
+      log('success', `Running latest version: v${currentVersion}`);
+    }
+  } catch (err) {
+    log('warn', `Failed to check for updates: ${err.message}`);
   }
 }
 
-function createBot(host, port = 25565, version) {
-  return new Promise((resolve, reject) => {
-    if (bot) return reject(log('warn', 'Bot already connected. Use "leave" first.'));
+/** BotController – handles all bot state and actions */
+class BotController {
+  constructor() {
+    this.bot = null;
+    this.connected = false;
+  }
 
-    log('info', `🔌 Connecting to ${chalk.yellow(host)}:${chalk.yellow(port)} ${version ? `(version: ${chalk.green(version)})` : ''}`);
-    bot = mineflayer.createBot({ host, port, version, auth: 'microsoft' });
-    bot.loadPlugin(pathfinder);
+  /** Create and connect the bot */
+  async connect(host, port = 25565, version) {
+    if (this.connected) return log('warn', 'Bot already connected. Use "leave" first.');
+    if (!host) return log('warn', 'Usage: join <ip> [port|version] [version]');
 
-    bot.once('spawn', () => {
-      connected = true;
-      const pos = bot.entity.position;
-      log('success', `🎮 Bot spawned at ${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)}`);
-      resolve(bot);
-    });
+    log('info', `🔌 Connecting to ${chalk.yellow(host)}:${chalk.yellow(port)} ${version ? `(v${version})` : ''}`);
 
-    bot.on('chat', (username, message) => {
-      if (username !== bot.username) log('chat', `${chalk.blue(username)}: ${message}`);
-    });
+    return new Promise((resolve) => {
+      this.bot = mineflayer.createBot({ host, port, version, auth: 'microsoft' });
+      this.bot.loadPlugin(pathfinder);
 
-    bot.on('message', (msg) => {
-      try {
+      this.bot.once('spawn', () => {
+        this.connected = true;
+        const pos = this.bot.entity.position;
+        log('success', `🎮 Spawned at ${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}, ${pos.z.toFixed(1)}`);
+        resolve();
+      });
+
+      this.bot.on('chat', (user, msg) => {
+        if (user !== this.bot.username) log('chat', `${chalk.blue(user)}: ${msg}`);
+      });
+
+      this.bot.on('message', (msg) => {
         const text = typeof msg === 'string' ? msg : msg.toString();
         log('event', `[srv msg] ${text}`);
-      } catch (e) {
-        log('warn', `Failed to parse server message: ${e.message}`);
-      }
-    });
+      });
 
-    bot.on('kicked', reason => log('error', `💀 Kicked: ${reason?.text || JSON.stringify(reason)}`));
-    bot.on('end', () => {
-      connected = false;
-      bot = null;
-      log('warn', '🔌 Disconnected.');
+      this.bot.on('kicked', (r) => log('error', `💀 Kicked: ${r?.text || JSON.stringify(r)}`));
+      this.bot.on('error', (err) => log('error', `🔥 ${err.message}`));
+      this.bot.on('end', () => {
+        this.connected = false;
+        this.bot = null;
+        log('warn', '🔌 Disconnected.');
+      });
     });
-    bot.on('error', err => log('error', `🔥 ${err.message}`));
+  }
 
-    const oldChat = bot.chat;
-    bot.chat = (msg) => {
-      if (!connected) return log('warn', 'Bot not connected.');
-      try {
-        oldChat.call(bot, msg.slice(0, 256));
-        log('info', `📢 You said: ${chalk.green(msg)}`);
-      } catch (e) {
-        log('warn', `Message not sent: ${e.message}`);
-      }
-    };
-  });
+  /** Disconnect the bot */
+  disconnect() {
+    if (!this.connected || !this.bot) return log('warn', 'No bot connected.');
+    this.bot.quit('User requested disconnect');
+    this.connected = false;
+    this.bot = null;
+    log('warn', '👋 Bot disconnected manually.');
+  }
+
+  /** Send chat message */
+  say(message) {
+    if (!this.connected) return log('warn', 'Bot not connected.');
+    if (!message) return log('warn', 'Usage: say <message>');
+    try {
+      this.bot.chat(message.slice(0, 256));
+      log('info', `📢 You said: ${chalk.green(message)}`);
+    } catch (err) {
+      log('error', `Chat failed: ${err.message}`);
+    }
+  }
+
+  /** Query info */
+  query(type) {
+    if (!this.connected) return log('warn', 'Not connected.');
+    if (type === 'position') {
+      const p = this.bot.entity.position;
+      log('info', `📍 Position: ${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}`);
+    } else if (type === 'players') {
+      log('info', `👥 Players online:`);
+      Object.keys(this.bot.players).forEach(p => console.log('   - ' + chalk.cyan(p)));
+    } else {
+      log('warn', 'Usage: query position | players');
+    }
+  }
+
+  /** Look at coordinates */
+  async lookAt(x, y, z) {
+    if (!this.connected) return log('warn', 'Not connected.');
+    if (![x, y, z].every(Number.isFinite)) return log('warn', 'Usage: lookat <x> <y> <z>');
+    try {
+      const vec3 = this.bot.vec3(x, y, z);
+      await this.bot.lookAt(vec3);
+      log('success', `👀 Looking at ${x},${y},${z}`);
+    } catch (e) {
+      log('error', `Look failed: ${e.message}`);
+    }
+  }
+
+  /** Move to coordinates */
+  goto(x, y, z) {
+    if (!this.connected) return log('warn', 'Not connected.');
+    if (![x, y, z].every(Number.isFinite)) return log('warn', 'Usage: goto <x> <y> <z>');
+    const mcData = minecraftData(this.bot.version);
+    const goal = new goals.GoalBlock(x, y, z);
+    const move = new Movements(this.bot, mcData);
+    this.bot.pathfinder.setMovements(move);
+    this.bot.pathfinder.setGoal(goal);
+    log('info', `🧭 Moving to ${x},${y},${z}`);
+  }
 }
 
-function leaveBot() {
-  if (!bot) return log('warn', 'No bot connected.');
-  bot.quit('User requested disconnect');
-  connected = false;
-  bot = null;
-  log('warn', '👋 Bot disconnected manually.');
-}
+const controller = new BotController();
 
+/** Command registry for cleaner extensibility */
+const commands = {
+  join: async (args) => {
+    const ip = args[0];
+    let port = 25565, version;
+    if (args[1]) args[1].includes('.') ? version = args[1] : port = parseInt(args[1]);
+    if (args[2]) version = args[2];
+    await controller.connect(ip, port, version);
+  },
+  leave: () => controller.disconnect(),
+  say: (args) => controller.say(args.join(' ')),
+  query: (args) => controller.query(args[0]),
+  lookat: async (args) => {
+    const [x, y, z] = args.map(Number);
+    await controller.lookAt(x, y, z);
+  },
+  goto: (args) => {
+    const [x, y, z] = args.map(Number);
+    controller.goto(x, y, z);
+  },
+  help: () => {
+    console.log(chalk.bold('\nAvailable Commands:'));
+    console.log(chalk.cyan('  join <ip> [port|version] [version] ') + '→ connect to a server');
+    console.log(chalk.cyan('  leave                       ') + '→ disconnect');
+    console.log(chalk.cyan('  say <message>               ') + '→ send chat message');
+    console.log(chalk.cyan('  query position | players    ') + '→ show info');
+    console.log(chalk.cyan('  lookat <x> <y> <z>          ') + '→ face a coordinate');
+    console.log(chalk.cyan('  goto <x> <y> <z>            ') + '→ walk to coords');
+    console.log(chalk.cyan('  help                        ') + '→ show this help\n');
+  },
+};
+
+/** Handle user command */
 async function handleCommand(input) {
   const [cmd, ...args] = input.trim().split(' ');
   if (!cmd) return;
-
-  switch (cmd.toLowerCase()) {
-    case 'join': {
-      if (args.length < 1) return log('warn', 'Usage: join <ip> [port|version] [version]');
-      const ip = args[0];
-      let port = 25565, version;
-      if (args[1]) args[1].includes('.') ? (version = args[1]) : (port = parseInt(args[1]));
-      if (args[2]) version = args[2];
-      try { await createBot(ip, port, version); } catch {}
-      break;
-    }
-
-    case 'leave':
-      leaveBot();
-      break;
-
-    case 'say': {
-      if (!bot) return log('warn', 'Bot is not connected.');
-      const msg = args.join(' ');
-      if (!msg) return log('warn', 'Usage: say <message>');
-      bot.chat(msg);
-      break;
-    }
-
-    case 'query': {
-      if (!bot) return log('warn', 'Not connected.');
-      if (args[0] === 'position') {
-        const p = bot.entity.position;
-        log('info', `📍 Position: ${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}`);
-      } else if (args[0] === 'players') {
-        log('info', `👥 Players online:`);
-        Object.keys(bot.players).forEach(p => console.log('   - ' + chalk.cyan(p)));
-      } else log('warn', 'Usage: query position | players');
-      break;
-    }
-
-    case 'lookat': {
-      if (!bot) return log('warn', 'Not connected.');
-      if (args.length < 3) return log('warn', 'Usage: lookat <x> <y> <z>');
-      const [x, y, z] = args.map(Number);
-      try { await bot.lookAt(bot.vec3(x, y, z)); log('success', `👀 Looking at ${x},${y},${z}`); } 
-      catch (e) { log('error', `Look failed: ${e}`); }
-      break;
-    }
-
-    case 'goto': {
-      if (!bot) return log('warn', 'Not connected.');
-      if (args.length < 3) return log('warn', 'Usage: goto <x> <y> <z>');
-      const [x, y, z] = args.map(Number);
-      const goal = new goals.GoalBlock(x, y, z);
-      const mcData = minecraftData(bot.version);
-      const defaultMove = new Movements(bot, mcData);
-      bot.pathfinder.setMovements(defaultMove);
-      bot.pathfinder.setGoal(goal);
-      log('info', `🧭 Moving to ${x},${y},${z}`);
-      break;
-    }
-
-    case 'help':
-      console.log(chalk.bold('\nAvailable Commands:'));
-      console.log(chalk.cyan('  join <ip> [port|version] [version] ') + '→ connect to a server');
-      console.log(chalk.cyan('  leave                       ') + '→ disconnect');
-      console.log(chalk.cyan('  say <message>               ') + '→ send chat message');
-      console.log(chalk.cyan('  query position | players    ') + '→ show info');
-      console.log(chalk.cyan('  lookat <x> <y> <z>          ') + '→ face a coordinate');
-      console.log(chalk.cyan('  goto <x> <y> <z>            ') + '→ walk to coords');
-      console.log(chalk.cyan('  help                        ') + '→ show this help\n');
-      break;
-
-    default:
-      log('warn', `Unknown command: ${cmd}`);
+  const fn = commands[cmd.toLowerCase()];
+  if (!fn) return log('warn', `Unknown command: ${cmd}`);
+  try {
+    await fn(args);
+  } catch (e) {
+    log('error', `Command failed: ${e.message}`);
   }
 }
 
+/** Program entry point */
 async function init() {
-  const latestVersion = await checkForUpdate();
-
-  log('success', `Welcome back to MCCLI, version v${currentVersion}`);
-  log('success', 'This program allows you to play/join any server and do simple tasks such as chat, move, lookat, etc.');
-  log('success', 'To learn more, simply write "help" in the console at any time.');
-
+  await checkForUpdate();
+  log('success', `Welcome to MCCLI v${currentVersion}`);
+  log('success', 'Type "help" for commands.');
   rl.prompt();
-  rl.on('line', async line => { await handleCommand(line); rl.prompt(); });
-  rl.on('SIGINT', () => { leaveBot(); process.exit(0); });
+
+  rl.on('line', async line => {
+    await handleCommand(line);
+    rl.prompt();
+  });
+
+  rl.on('SIGINT', () => {
+    controller.disconnect();
+    process.exit(0);
+  });
 }
 
 init();
