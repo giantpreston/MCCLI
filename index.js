@@ -1,7 +1,10 @@
 /**
- * MCCLI v1.1.1pr
- * Modular rewrite of v1.0.0 for maintainability, clarity, and scalability.
- * Added "_rc" (release candidate) check in version handler.
+ * MCCLI v1.1.1pr – Improved for stability & optional auto-reconnect
+ * Features:
+ *  - Precondition checks on all commands
+ *  - Prevent multiple connect() calls
+ *  - Optional auto-reconnect with stored connection info
+ *  - Clean handling of version/port arguments
  */
 
 const mineflayer = require('mineflayer');
@@ -11,7 +14,7 @@ const readline = require('readline');
 const chalk = require('chalk');
 const axios = require('axios');
 
-const currentVersion = '1.1.1_pr1';
+const currentVersion = '1.1.1_pr2';
 const versionURL = 'https://raw.githubusercontent.com/giantpreston/MCCLI/refs/heads/main/info/version.txt';
 
 const rl = readline.createInterface({
@@ -59,12 +62,21 @@ class BotController {
   constructor() {
     this.bot = null;
     this.connected = false;
+    this.autoReconnect = false;   // Optional toggleable auto-reconnect
+    this.lastHost = null;
+    this.lastPort = null;
+    this.lastVersion = null;
   }
 
   /** Create and connect the bot */
   async connect(host, port = 25565, version) {
-    if (this.connected) return log('warn', 'Bot already connected. Use "leave" first.');
+    if (this.connected) return log('error', 'Bot is already connected! Disconnect first.');
     if (!host) return log('warn', 'Usage: join <ip> [port|version] [version]');
+
+    // Store connection info for auto-reconnect
+    this.lastHost = host;
+    this.lastPort = port;
+    this.lastVersion = version;
 
     log('info', `🔌 Connecting to ${chalk.yellow(host)}:${chalk.yellow(port)} ${version ? `(v${version})` : ''}`);
 
@@ -88,12 +100,26 @@ class BotController {
         log('event', `[srv msg] ${text}`);
       });
 
-      this.bot.on('kicked', (r) => log('error', `💀 Kicked: ${r?.text || JSON.stringify(r)}`));
+      this.bot.on('kicked', async (r) => {
+        log('error', `💀 Kicked: ${r?.text || JSON.stringify(r)}`);
+        this.connected = false;
+        this.bot = null;
+        if (this.autoReconnect) {
+          log('info', '🔄 Attempting to reconnect...');
+          setTimeout(() => this.connect(this.lastHost, this.lastPort, this.lastVersion), 3000);
+        }
+      });
+
       this.bot.on('error', (err) => log('error', `🔥 ${err.message}`));
-      this.bot.on('end', () => {
+
+      this.bot.on('end', async () => {
         this.connected = false;
         this.bot = null;
         log('warn', '🔌 Disconnected.');
+        if (this.autoReconnect) {
+          log('info', '🔄 Attempting to reconnect...');
+          setTimeout(() => this.connect(this.lastHost, this.lastPort, this.lastVersion), 3000);
+        }
       });
     });
   }
@@ -105,6 +131,12 @@ class BotController {
     this.connected = false;
     this.bot = null;
     log('warn', '👋 Bot disconnected manually.');
+  }
+
+  /** Toggle auto-reconnect */
+  setAutoReconnect(flag) {
+    this.autoReconnect = !!flag;
+    log('info', `🔁 Auto-reconnect is now ${this.autoReconnect ? 'ENABLED' : 'DISABLED'}`);
   }
 
   /** Send chat message */
@@ -165,6 +197,7 @@ const controller = new BotController();
 const commands = {
   join: async (args) => {
     const ip = args[0];
+    if (!ip) return log('warn', 'Usage: join <ip> [port|version] [version]');
     let port = 25565, version;
     if (args[1]) args[1].includes('.') ? version = args[1] : port = parseInt(args[1]);
     if (args[2]) version = args[2];
@@ -181,6 +214,10 @@ const commands = {
     const [x, y, z] = args.map(Number);
     controller.goto(x, y, z);
   },
+  autoreconnect: (args) => {
+    if (!args[0]) return log('warn', 'Usage: autoreconnect true|false');
+    controller.setAutoReconnect(args[0].toLowerCase() === 'true');
+  },
   help: () => {
     console.log(chalk.bold('\nAvailable Commands:'));
     console.log(chalk.cyan('  join <ip> [port|version] [version] ') + '→ connect to a server');
@@ -189,6 +226,7 @@ const commands = {
     console.log(chalk.cyan('  query position | players    ') + '→ show info');
     console.log(chalk.cyan('  lookat <x> <y> <z>          ') + '→ face a coordinate');
     console.log(chalk.cyan('  goto <x> <y> <z>            ') + '→ walk to coords');
+    console.log(chalk.cyan('  autoreconnect true|false    ') + '→ toggle auto-reconnect');
     console.log(chalk.cyan('  help                        ') + '→ show this help\n');
   },
 };
